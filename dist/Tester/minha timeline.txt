@@ -1,0 +1,17 @@
+Duplo Clique em (1960, 238)
+Esperar 3 segundos
+Clique Simples em (2658, 411)
+Lista: C:\Users\pedro\Desktop\numeros teste.txt
+Clique Simples em (2561, 475)
+Lista: C:\Users\pedro\Desktop\numeros teste - Copia.txt
+Botão Direito em (3128, 588)
+Esperar 1 segundos
+Scroll em (2178, 605)
+Esperar 1 segundos
+Duplo Clique em (2523, 411)
+Apagar Campo
+Pressionar Tecla: F5
+Esperar 1 segundos
+Clique Simples em (2080, 561)
+Pressionar Tecla: Alt_L+F4
+Esperar 1 segundos
