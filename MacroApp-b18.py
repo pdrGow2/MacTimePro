@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import threading
 import time
 import re
@@ -16,7 +16,6 @@ def resource_path(relative_path):
 
 def normalize_key(key):
     key = key.lower()
-    # Mapeamento completo Tkinter -> PyAutoGUI
     mapping = {
         'return': 'enter', 'control_l': 'ctrl', 'control_r': 'ctrl',
         'shift_l': 'shift', 'shift_r': 'shift', 'alt_l': 'alt', 'alt_r': 'alt',
@@ -57,9 +56,9 @@ class MacroApp:
     def __init__(self, root):
         self.root = root
         self.APP_NAME = "MacTime Pro"
-        self.APP_VERSION = "v3.0 (Final)"
+        self.APP_VERSION = "v3.1"
         self.APP_AUTHOR = "pdrGow2"
-        self.APP_DESC = "Automação avançada com Interface Moderna, Legendas e Controle Total."
+        self.APP_DESC = "Automação avançada com Interface Moderna."
         
         try: self.root.iconbitmap(resource_path("icone.ico"))
         except: pass
@@ -141,14 +140,12 @@ class MacroApp:
         cb = tk.Checkbutton(card, variable=var, bg=self.colors["card"], bd=0, relief=tk.FLAT,
                              activebackground=self.colors["card"], selectcolor="black", fg="white", cursor="hand2")
         cb.pack(side=tk.LEFT, padx=8)
-        
         icon = "🔹"
         if "Clique" in event_text: icon = "🖱️"
         elif "Digitar" in event_text: icon = "📝"
         elif "Tecla" in event_text: icon = "⌨️"
         elif "Esperar" in event_text: icon = "⏱️"
         elif "Lista" in event_text: icon = "📋"
-        
         lbl = tk.Label(card, text=f"{icon}  {event_text}", bg=self.colors["card"], fg=self.colors["text"], font=("Segoe UI", 10), anchor="w", padx=5)
         lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
         menu_btn = tk.Label(card, text="⋮", bg=self.colors["card"], fg="#aaaaaa", font=("Segoe UI", 14, "bold"), cursor="hand2", width=3)
@@ -173,12 +170,12 @@ class MacroApp:
         
         def show_menu(e):
             m = tk.Menu(self.root, tearoff=0, bg="#2d2d2d", fg="white", font=("Segoe UI", 10))
-            m.add_command(label="Editar", command=lambda: self.on_double_click_event(None, lbl))
-            m.add_command(label="Legenda", command=lambda: self.edit_legend(item_data))
-            ign_txt = "Ativar" if item_data["ignore"] else "Ignorar"
+            m.add_command(label="  Editar", command=lambda: self.on_double_click_event(None, lbl))
+            m.add_command(label="  Legenda", command=lambda: self.edit_legend(item_data))
+            ign_txt = "  Ativar" if item_data["ignore"] else "  Ignorar"
             m.add_command(label=ign_txt, command=lambda: self.toggle_ignore(item_data))
             m.add_separator()
-            m.add_command(label="Remover", command=lambda: self.delete_single_item(item_data))
+            m.add_command(label="  Remover", command=lambda: self.delete_single_item(item_data))
             m.post(e.x_root, e.y_root)
 
         for w in [card, lbl, lbl_legend]:
@@ -500,22 +497,20 @@ class MacroApp:
             tk.Label(win, text="Pressione as teclas.", bg="#2b2b2b", fg="#ccc").pack(pady=5)
             mode = tk.StringVar(value=initial_mode)
             self._toggle_helper(win, [("Simples","Simples"), ("Manter","Manter"), ("Repetida","Repetida")], mode)
-            
             row = tk.Frame(win, bg="#2b2b2b"); row.pack(pady=15)
             tk.Label(row, text="Combinação:", bg="#2b2b2b", fg="white", font=("",10,"bold")).pack(side=tk.LEFT, padx=5)
             ent = tk.Entry(row, width=20, justify="center", bg="#404040", fg="white", relief=tk.FLAT); ent.pack(side=tk.LEFT, padx=5, ipady=3)
             ent.insert(0, "+".join(keys_captured))
             tk.Button(row, text="🗑️", command=lambda: (keys_captured.clear(), ent.delete(0, tk.END)), bg="#505050", fg="white", bd=0, width=3, cursor="hand2").pack(side=tk.LEFT, padx=5)
-            
             p_fr = tk.Frame(win, bg="#2b2b2b"); p_fr.pack(pady=5)
             lbl_p = tk.Label(p_fr, text="Tempo (s):", bg="#2b2b2b", fg="white"); lbl_p.pack(side=tk.LEFT)
             p_ent = tk.Entry(p_fr, width=6, justify="center"); p_ent.pack(side=tk.LEFT, padx=5); p_ent.insert(0, initial_duration)
-            
             def upd(*a):
-                if mode.get() == "Simples": p_fr.pack_forget()
-                else: p_fr.pack(); lbl_p.config(text="Repetir por (s):" if mode.get()=="Repetida" else "Duração (s):")
+                m = mode.get()
+                if m == "Simples": p_fr.pack_forget()
+                elif m == "Manter": p_fr.pack(); lbl_p.config(text="Duração (s):")
+                elif m == "Repetida": p_fr.pack(); lbl_p.config(text="Quantidade:")
             mode.trace("w", upd); upd()
-            
             def on_k(e):
                 if e.keysym not in keys_captured: keys_captured.append(e.keysym)
                 ent.delete(0, tk.END); ent.insert(0, "+".join(keys_captured)); return "break"
@@ -525,20 +520,24 @@ class MacroApp:
         def confirm(win):
             d = win.user_data; k = d["k"]; m = d["m"].get(); p = d["p"].get()
             if not k: return False
-            if on_confirm: on_confirm(m, k, p.strip() or "1.0")
+            if on_confirm: on_confirm(m, k, p.strip() or "1")
             return True
         self._open_generic_dialog(title, 320, content, confirm)
 
     def add_key_event(self):
-        self._open_key_dialog("Adicionar Tecla", on_confirm=lambda m, k, d: self.add_event(f"Pressionar Tecla: {'+'.join(k)}" if m=="Simples" else f"Manter pressionada: {'+'.join(k)} - Duração: {d}s" if m=="Manter" else f"Tecla repetida: {'+'.join(k)} - Repetir por: {d}s"))
+        self._open_key_dialog("Adicionar Tecla", on_confirm=lambda m, k, d: self.add_event(f"Pressionar Tecla: {'+'.join(k)}" if m=="Simples" else f"Manter pressionada: {'+'.join(k)} - Duração: {d}s" if m=="Manter" else f"Tecla repetida: {'+'.join(k)} - Repetir: {d}x"))
 
     def edit_key_event(self, label):
         txt = label.cget("text"); m, k, d = "Simples", [], ""
-        if " - Duração: " in txt: m="Manter"; k=txt.split(" - Duração: ")[0].replace("Manter pressionada: ", "").split("+"); d=txt.split(" - Duração: ")[1].replace("s","")
-        elif " - Repetir por: " in txt: m="Repetida"; k=txt.split(" - Repetir por: ")[0].replace("Tecla repetida: ", "").split("+"); d=txt.split(" - Repetir por: ")[1].replace("s","")
+        if " - Duração: " in txt: 
+            m="Manter"; k=txt.split(" - Duração: ")[0].replace("Manter pressionada: ", "").split("+")
+            d=txt.split(" - Duração: ")[1].replace("s","")
+        elif " - Repetir: " in txt: 
+            m="Repetida"; k=txt.split(" - Repetir: ")[0].replace("Tecla repetida: ", "").split("+")
+            d=txt.split(" - Repetir: ")[1].replace("x","")
         elif "Pressionar Tecla: " in txt: k=txt.replace("Pressionar Tecla: ", "").split("+")
         def save(mode, keys, dur):
-            label.config(text=f"Pressionar Tecla: {'+'.join(keys)}" if mode=="Simples" else f"Manter pressionada: {'+'.join(keys)} - Duração: {dur}s" if mode=="Manter" else f"Tecla repetida: {'+'.join(keys)} - Repetir por: {dur}s")
+            label.config(text=f"Pressionar Tecla: {'+'.join(keys)}" if mode=="Simples" else f"Manter pressionada: {'+'.join(keys)} - Duração: {dur}s" if mode=="Manter" else f"Tecla repetida: {'+'.join(keys)} - Repetir: {dur}x")
         self._open_key_dialog("Editar Tecla", m, k, d, save)
 
     # Lista
@@ -800,24 +799,39 @@ class MacroApp:
             time.sleep(0.2)
         elif "Digitar:" in text:
             ft = item["label"].full_text if hasattr(item["label"], "full_text") else text.replace("Digitar:", "").strip()
-            pyautogui.write(ft); time.sleep(0.2)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(ft)
+            self.root.update()
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.2)
         elif "Tecla" in text or "pressionada" in text:
             try:
                 if "Pressionar Tecla" in text: 
                     k = [normalize_key(x) for x in text.replace("Pressionar Tecla: ", "").strip().split("+")]
                     pyautogui.hotkey(*k)
                 elif "Manter" in text:
-                    parts = text.split(" - Duração: "); d = float(parts[1].replace("s","").strip()); k = [normalize_key(x) for x in parts[0].replace("Manter pressionada: ", "").split("+")]
-                    for key in k: pyautogui.keyDown(key)
-                    start = time.time()
-                    while time.time() - start < d:
+                    # Manter AGORA É RAPID FIRE (SPAM)
+                    parts = text.split(" - Duração: ")
+                    d = float(parts[1].replace("s","").strip())
+                    k = [normalize_key(x) for x in parts[0].replace("Manter pressionada: ", "").split("+")]
+                    
+                    end_time = time.time() + d
+                    while time.time() < end_time:
                         if self.stop_requested: break
-                        time.sleep(0.1)
-                    for key in reversed(k): pyautogui.keyUp(key)
+                        pyautogui.hotkey(*k)
+                        time.sleep(0.05) # ~20x por segundo
+                        
                 elif "repetida" in text:
-                    parts = text.split(" - Repetir por: "); d = float(parts[1].replace("s","").strip()); k = [normalize_key(x) for x in parts[0].replace("Tecla repetida: ", "").split("+")]
-                    end = time.time() + d
-                    while time.time() < end and not self.stop_requested: pyautogui.hotkey(*k); time.sleep(0.1)
+                    # Repetida AGORA É QUANTIDADE
+                    parts = text.split(" - Repetir: ")
+                    count = int(parts[1].replace("x","").strip())
+                    k = [normalize_key(x) for x in parts[0].replace("Tecla repetida: ", "").split("+")]
+                    
+                    for _ in range(count):
+                        if self.stop_requested: break
+                        pyautogui.hotkey(*k)
+                        time.sleep(0.05)
             except Exception as e: print(f"Erro tecla: {e}")
             time.sleep(0.2)
         elif "Esperar" in text:
@@ -830,7 +844,10 @@ class MacroApp:
             try:
                 p = text.split("Lista:")[1].strip()
                 if p in self.loaded_lists and self.loaded_index[p] < len(self.loaded_lists[p]):
-                    pyautogui.write(self.loaded_lists[p][self.loaded_index[p]]); self.loaded_index[p] += 1; time.sleep(0.2)
+                    val = self.loaded_lists[p][self.loaded_index[p]]
+                    self.root.clipboard_clear(); self.root.clipboard_append(val); self.root.update()
+                    pyautogui.hotkey("ctrl", "v")
+                    self.loaded_index[p] += 1; time.sleep(0.2)
             except: pass
 
 if __name__ == "__main__":
