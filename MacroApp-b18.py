@@ -7,6 +7,7 @@ import os
 import sys
 import pyautogui
 import ctypes
+import copy # Necessário para o Histórico
 
 # --- UTILITÁRIOS GERAIS ---
 def resource_path(relative_path):
@@ -28,20 +29,15 @@ def normalize_key(key):
     }
     return mapping.get(key, key)
 
-# --- CLASSES DE INTERFACE ---
 class CreateToolTip:
     def __init__(self, widget, text='widget info'):
-        self.widget = widget
-        self.text = text
-        self.tipwindow = None
-        widget.bind("<Enter>", self.showtip)
-        widget.bind("<Leave>", self.hidetip)
+        self.widget = widget; self.text = text; self.tipwindow = None
+        widget.bind("<Enter>", self.showtip); widget.bind("<Leave>", self.hidetip)
     def showtip(self, event=None):
         if self.tipwindow or not self.text: return
         x, y = self.widget.winfo_rootx() + 20, self.widget.winfo_rooty() + self.widget.winfo_height() + 5
         self.tipwindow = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(1)
-        tw.configure(bg="#2b2b2b")
+        tw.wm_overrideredirect(1); tw.configure(bg="#2b2b2b")
         tw.wm_geometry(f"+{x}+{y}")
         tk.Label(tw, text=self.text, justify=tk.LEFT, background="#ffffe0", relief=tk.SOLID, borderwidth=1, font=("tahoma", "8", "normal")).pack(ipadx=1)
     def hidetip(self, event=None):
@@ -55,49 +51,119 @@ def add_hover_effect(widget, normal_bg, hover_bg):
 class MacroApp:
     def __init__(self, root):
         self.root = root
-        self.APP_NAME = "MacTime Pro"
-        self.APP_VERSION = "v3.1"
-        self.APP_AUTHOR = "pdrGow2"
-        self.APP_DESC = "Automação avançada com Interface Moderna."
+        self.APP_NAME, self.APP_VERSION, self.APP_AUTHOR = "MacTime Pro", "v3.3", "pdrGow2"
+        self.APP_DESC = "Automação avançada com Histórico (Undo/Redo)."
+        self.FILE_VERSION = "3.2"
         
         try: self.root.iconbitmap(resource_path("icone.ico"))
         except: pass
         
-        # CORES
         self.colors = {
             "bg": "#2b2b2b", "card": "#404040", "card_hover": "#4a4a4a",  
             "card_selected": "#264f78", "text": "#ffffff", "accent": "#007acc",
             "timeline_bg": "#333333", "btn_active": "#007acc", "btn_inactive": "#3a3a3a"
         }
         
-        self.root.title(self.APP_NAME)
-        self.root.configure(bg=self.colors["bg"])
-        self.root.geometry("940x550")
+        self.root.title(self.APP_NAME); self.root.configure(bg=self.colors["bg"]); self.root.geometry("940x550")
         
         self.executing, self.stop_requested, self.message_shown = False, False, False
-        self.suppress_messages = False; self.interrupt_reason = None
+        self.suppress_messages, self.interrupt_reason = False, None
         self.loaded_lists, self.loaded_index, self.list_settings = {}, {}, {}
         self.events = []
         
-        # Drag & Drop
-        self.drag_data = {"item_index": -1, "active": False, "ghost": None}
+        self.drag_data = {"item_index": -1, "active": False, "ghost": None, "moved": False}
         self.last_selected_index = None
+
+        # --- SISTEMA DE HISTÓRICO ---
+        self.history = []
+        self.history_index = -1
+        self.is_undoing = False # Flag para evitar loop infinito de salvamento
+        
+        # Bindings globais
+        self.root.bind("<Control-z>", self.undo)
+        self.root.bind("<Control-y>", self.redo)
         
         self.create_ui()
+        self.save_history() # Salva estado inicial vazio
 
+    # --- HISTÓRICO (UNDO/REDO) ---
+    def get_snapshot(self):
+        # Cria uma cópia pura dos dados (sem widgets)
+        snapshot = {
+            "events": [],
+            "list_settings": copy.deepcopy(self.list_settings)
+        }
+        for item in self.events:
+            snapshot["events"].append({
+                "text": self._clean_text(item["label"].cget("text")),
+                "full": getattr(item["label"], "full_text", None),
+                "chk": item["checkvar"].get(),
+                "legend": item["legend"],
+                "ignore": item["ignore"]
+            })
+        return snapshot
+
+    def save_history(self):
+        if self.is_undoing: return # Não salva se estivermos no meio de um undo/redo
+        
+        # Se estamos no meio do histórico e fazemos algo novo, apagamos o futuro
+        if self.history_index < len(self.history) - 1:
+            self.history = self.history[:self.history_index + 1]
+        
+        # Adiciona novo estado
+        current_state = self.get_snapshot()
+        
+        # Evita duplicatas (salvar se nada mudou)
+        if self.history and self.history[-1] == current_state:
+            return
+
+        self.history.append(current_state)
+        self.history_index += 1
+        
+        # Limita tamanho do histórico (opcional, ex: 50 passos)
+        if len(self.history) > 50:
+            self.history.pop(0)
+            self.history_index -= 1
+
+    def restore_snapshot(self, snapshot):
+        self.is_undoing = True
+        
+        # Restaura configurações de lista
+        self.list_settings = copy.deepcopy(snapshot["list_settings"])
+        
+        # Limpa timeline visual
+        for w in self.scrollable_frame.winfo_children(): w.destroy()
+        self.events = []
+        
+        # Reconstrói eventos (passando save=False para não gerar histórico recursivo)
+        for d in snapshot["events"]:
+            self.add_event(d["text"], legend=d["legend"], ignore=d["ignore"], save=False)
+            if d["full"]: self.events[-1]["label"].full_text = d["full"]
+            self.events[-1]["checkvar"].set(d["chk"])
+            self.update_item_style_full(self.events[-1])
+            
+        self.is_undoing = False
+
+    def undo(self, event=None):
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.restore_snapshot(self.history[self.history_index])
+
+    def redo(self, event=None):
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self.restore_snapshot(self.history[self.history_index])
+
+    # --- UI ---
     def create_ui(self):
-        btn_frame = tk.Frame(self.root, bg=self.colors["bg"])
-        btn_frame.pack(fill=tk.X, pady=10)
-        left_frame = tk.Frame(btn_frame, bg=self.colors["bg"])
-        left_frame.pack(side=tk.LEFT, padx=15)
-        right_frame = tk.Frame(btn_frame, bg=self.colors["bg"])
-        right_frame.pack(side=tk.RIGHT, padx=15)
+        btn_frame = tk.Frame(self.root, bg=self.colors["bg"]); btn_frame.pack(fill=tk.X, pady=10)
+        left_frame = tk.Frame(btn_frame, bg=self.colors["bg"]); left_frame.pack(side=tk.LEFT, padx=15)
+        right_frame = tk.Frame(btn_frame, bg=self.colors["bg"]); right_frame.pack(side=tk.RIGHT, padx=15)
         
         def create_emoji_button(parent, emoji, cmd, tip, bg="#404040", fg="white", width=4, font=("Segoe UI Emoji", 18)):
             btn = tk.Button(parent, text=emoji, command=cmd, font=font, width=width, height=1, 
                             relief=tk.FLAT, bd=0, bg=bg, fg=fg, cursor="hand2", anchor=tk.CENTER)
-            CreateToolTip(btn, tip)
-            add_hover_effect(btn, normal_bg=bg, hover_bg="#5a5a5a")
+            CreateToolTip(btn, tip); add_hover_effect(btn, normal_bg=bg, hover_bg="#5a5a5a")
             return btn
         
         for btn_def in [("🖱️", self.capture_mouse_click, "Capturar Clique"), ("📝", self.add_text_event, "Adicionar Texto"), ("⌨️", self.add_key_event, "Adicionar Tecla"), ("⏱️", self.add_wait_event, "Adicionar Espera"), ("🗑️", self.add_clear_event, "Apagar Campo"), ("📋", self.load_timeline, "Carregar Lista")]:
@@ -122,6 +188,7 @@ class MacroApp:
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.canvas.find_all()[0], width=e.width))
         self.canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
@@ -131,8 +198,8 @@ class MacroApp:
         if self.scrollable_frame.winfo_height() > self.canvas.winfo_height():
             self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
-    # --- TIMELINE ITEM ---
-    def add_event(self, event_text, legend="", ignore=False):
+    # --- TIMELINE ITEM (Atualizado para Histórico) ---
+    def add_event(self, event_text, legend="", ignore=False, save=True):
         index = len(self.events)
         card = tk.Frame(self.scrollable_frame, bg=self.colors["card"], bd=0, pady=2)
         card.pack(fill=tk.X, pady=2, padx=5, expand=True)
@@ -140,17 +207,18 @@ class MacroApp:
         cb = tk.Checkbutton(card, variable=var, bg=self.colors["card"], bd=0, relief=tk.FLAT,
                              activebackground=self.colors["card"], selectcolor="black", fg="white", cursor="hand2")
         cb.pack(side=tk.LEFT, padx=8)
+        
         icon = "🔹"
         if "Clique" in event_text: icon = "🖱️"
         elif "Digitar" in event_text: icon = "📝"
         elif "Tecla" in event_text: icon = "⌨️"
         elif "Esperar" in event_text: icon = "⏱️"
         elif "Lista" in event_text: icon = "📋"
+        
         lbl = tk.Label(card, text=f"{icon}  {event_text}", bg=self.colors["card"], fg=self.colors["text"], font=("Segoe UI", 10), anchor="w", padx=5)
         lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
         menu_btn = tk.Label(card, text="⋮", bg=self.colors["card"], fg="#aaaaaa", font=("Segoe UI", 14, "bold"), cursor="hand2", width=3)
         menu_btn.pack(side=tk.RIGHT, padx=5)
-        
         lbl_legend = tk.Label(card, text=legend, bg=self.colors["card"], fg="#888888", font=("Segoe UI", 9, "italic"), anchor="e")
         if legend: lbl_legend.pack(side=tk.RIGHT, padx=10)
         
@@ -167,7 +235,6 @@ class MacroApp:
             if not var.get(): self.update_item_color(item_data, self.colors["card_hover"])
         def on_leave(e):
             if not var.get(): self.update_item_color(item_data, self.colors["card"])
-        
         def show_menu(e):
             m = tk.Menu(self.root, tearoff=0, bg="#2d2d2d", fg="white", font=("Segoe UI", 10))
             m.add_command(label="  Editar", command=lambda: self.on_double_click_event(None, lbl))
@@ -184,16 +251,17 @@ class MacroApp:
             w.bind("<ButtonRelease-1>", self.drag_stop)
             w.bind("<Double-Button-1>", lambda e: self.on_double_click_event(e, lbl))
             w.bind("<Enter>", on_enter); w.bind("<Leave>", on_leave)
+            w.bind("<Button-3>", show_menu)
         menu_btn.bind("<Button-1>", show_menu)
+        
+        if save: self.save_history() # PONTO DE SALVAMENTO
 
     def update_item_style_full(self, item):
         bg_c = self.colors["card_selected"] if item["checkvar"].get() else self.colors["card"]
         if item["ignore"]:
-            fnt = ("Segoe UI", 10, "overstrike")
-            fg_c = "#777777"
+            fnt = ("Segoe UI", 10, "overstrike"); fg_c = "#777777"
         else:
-            fnt = ("Segoe UI", 10)
-            fg_c = self.colors["text"]
+            fnt = ("Segoe UI", 10); fg_c = self.colors["text"]
         item["label"].config(font=fnt, fg=fg_c)
         self.update_item_color(item, bg_c)
 
@@ -201,23 +269,24 @@ class MacroApp:
         item["frame"].config(bg=color); item["label"].config(bg=color); item["menu_btn"].config(bg=color)
         item["cb"].config(bg=color, activebackground=color); item["legend_lbl"].config(bg=color)
 
-    def refresh_timeline(self):
-        data = []
-        for item in self.events:
-            data.append({
-                "text": self._clean_text(item["label"].cget("text")),
-                "full": getattr(item["label"], "full_text", None),
-                "chk": item["checkvar"].get(),
-                "legend": item["legend"],
-                "ignore": item["ignore"]
-            })
+    def refresh_timeline(self, save=True):
+        # O refresh agora é puramente visual, usando self.events já alterado
+        # Se for chamado por drag/move, pode querer salvar
         for w in self.scrollable_frame.winfo_children(): w.destroy()
-        self.events = []
-        for d in data:
-            self.add_event(d["text"], legend=d["legend"], ignore=d["ignore"])
-            if d["full"]: self.events[-1]["label"].full_text = d["full"]
-            self.events[-1]["checkvar"].set(d["chk"])
+        
+        # Recria visual (sem alterar dados)
+        # Fazemos uma copia da lista de dados para iterar
+        current_events_data = [e for e in self.events]
+        self.events = [] # Limpa para o add_event popular de novo com novos widgets
+        
+        for d in current_events_data:
+            # Usa add_event com save=False para não gerar histórico durante reconstrução
+            self.add_event(d["text"], legend=d["legend"], ignore=d["ignore"], save=False)
+            if hasattr(d["label"], "full_text"): self.events[-1]["label"].full_text = d["label"].full_text
+            self.events[-1]["checkvar"].set(d["checkvar"].get())
             self.update_item_style_full(self.events[-1])
+            
+        if save: self.save_history()
 
     def _clean_text(self, text):
         return text.replace("🖱️  ", "").replace("📝  ", "").replace("⌨️  ", "").replace("⏱️  ", "").replace("📋  ", "").replace("🔹  ", "")
@@ -246,13 +315,14 @@ class MacroApp:
                 self.deselect_all(None); self.events[idx]["checkvar"].set(True)
                 self.update_item_style_full(self.events[idx])
             self.last_selected_index = idx
-        self.drag_data["item_index"] = idx; self.drag_data["active"] = True
+        self.drag_data["item_index"] = idx; self.drag_data["active"] = True; self.drag_data["moved"] = False
 
     def deselect_all(self, event):
         for item in self.events: item["checkvar"].set(False); self.update_item_style_full(item)
 
     def drag_motion(self, event):
         if not self.drag_data["active"]: return
+        self.drag_data["moved"] = True
         if not self.drag_data["ghost"]:
             self.drag_data["ghost"] = tk.Toplevel(self.root)
             self.drag_data["ghost"].overrideredirect(True)
@@ -270,16 +340,27 @@ class MacroApp:
             for i in sorted(sel, reverse=True): del self.events[i]
             ins = max(0, target_idx - (len(items) - 1 if target_idx > sel[0] else 0))
             for item in reversed(items): self.events.insert(ins, item)
-            self.refresh_timeline(); self.drag_data["item_index"] = target_idx 
+            # Chama refresh sem salvar para não spammar histórico durante o drag
+            self.refresh_timeline(save=False)
+            self.drag_data["item_index"] = target_idx 
 
     def drag_stop(self, event):
         self.drag_data["active"] = False
         if self.drag_data["ghost"]: self.drag_data["ghost"].destroy(); self.drag_data["ghost"] = None
+        # Salva histórico apenas ao SOLTAR e se moveu
+        if self.drag_data["moved"]:
+            self.save_history()
+            self.drag_data["moved"] = False
 
     # --- UTILITÁRIOS E MENUS ---
     def toggle_ignore(self, item_data):
-        item_data["ignore"] = not item_data["ignore"]
-        self.update_item_style_full(item_data)
+        new_state = not item_data["ignore"]
+        if item_data["checkvar"].get():
+             for item in [e for e in self.events if e["checkvar"].get()]:
+                 item["ignore"] = new_state; self.update_item_style_full(item)
+        else:
+            item_data["ignore"] = new_state; self.update_item_style_full(item_data)
+        self.save_history() # Salva
 
     def edit_legend(self, item_data):
         def content(win):
@@ -291,6 +372,7 @@ class MacroApp:
             item_data["legend_lbl"].config(text=txt)
             if txt: item_data["legend_lbl"].pack(side=tk.RIGHT, padx=10)
             else: item_data["legend_lbl"].pack_forget()
+            self.save_history() # Salva
             return True
         self._open_generic_dialog("Editar Legenda", 150, content, confirm)
 
@@ -308,6 +390,7 @@ class MacroApp:
                 elif "Esperar" in text: icon = "⏱️"
                 elif "Lista" in text: icon = "📋"
                 self.lbl.config(text=f"{icon}  {text}")
+                # O save_history será chamado pelo editor ao confirmar
             @property
             def full_text(self): return getattr(self.lbl, "full_text", None)
             @full_text.setter
@@ -321,7 +404,7 @@ class MacroApp:
 
     def delete_single_item(self, item):
         if messagebox.askyesno("Confirmar", "Tem certeza que deseja remover este item?", parent=self.root):
-            item["frame"].destroy(); self.events.remove(item); self.refresh_timeline()
+            item["frame"].destroy(); self.events.remove(item); self.refresh_timeline() # Refresh já salva
 
     def delete_selected_events(self, event=None):
         sel = [item for item in self.events if item["checkvar"].get()]
@@ -330,7 +413,7 @@ class MacroApp:
         if messagebox.askyesno("Confirmar Exclusão", msg, parent=self.root):
             [item["frame"].destroy() for item in sel]
             for item in sel: self.events.remove(item)
-            self.refresh_timeline()
+            self.refresh_timeline() # Refresh salva
     
     def move_selected_up(self): self._move_selection(-1)
     def move_selected_down(self): self._move_selection(1)
@@ -339,7 +422,7 @@ class MacroApp:
         for i in sel:
             if 0 <= i + direction < len(self.events) and not self.events[i+direction]["checkvar"].get():
                 self.events[i], self.events[i+direction] = self.events[i+direction], self.events[i]
-        self.refresh_timeline()
+        self.refresh_timeline() # Refresh salva
 
     # --- MODAIS ---
     def center_window(self, win, width, height):
@@ -378,8 +461,7 @@ class MacroApp:
         for txt, val in options:
             b = tk.Button(fr, text=txt, command=lambda v=val: (var.set(v), upd()),
                           bg=self.colors["btn_inactive"], fg="white", relief=tk.FLAT, bd=0, width=10, pady=5, cursor="hand2")
-            b.pack(side=tk.LEFT, padx=2)
-            buttons.append((b, val))
+            b.pack(side=tk.LEFT, padx=2); buttons.append((b, val))
         upd()
 
     # --- JANELAS ---
@@ -413,8 +495,7 @@ class MacroApp:
             if not win.winfo_exists() or not self._capturing: return
             try:
                 if ctypes.windll.user32.GetAsyncKeyState(0x0D) & 0x8000: confirm(); return
-                x,y = pyautogui.position()
-                coord.config(text=f"X: {x}  Y: {y}")
+                x,y = pyautogui.position(); coord.config(text=f"X: {x}  Y: {y}")
             except: pass
             win.after(50, loop)
         
@@ -450,10 +531,8 @@ class MacroApp:
 
     def edit_click_event(self, label):
         t = label.cget("text"); m, p = "Simples", ""
-        if "Pressionar" in t: 
-            m = "Pressionar"; p = t.split("Duração: ")[1].replace("s","")
-        elif "repetido" in t: 
-            m = "Repetido"; p = t.split("Repetir por: ")[1].replace("s","")
+        if "Pressionar" in t: m="Pressionar"; p = t.split("Duração: ")[1].replace("s","")
+        elif "repetido" in t: m="Repetido"; p = t.split("Repetir por: ")[1].replace("s","")
         elif "Duplo" in t: m = "Duplo"
         elif "Direito" in t: m = "Direito"
         elif "Scroll" in t: m = "Scroll"
@@ -465,6 +544,7 @@ class MacroApp:
             elif mo=="Pressionar": txt = f"Pressionar por tempo em ({x}, {y}) - Duração: {pa}s"
             else: txt = f"Clique repetido em ({x}, {y}) - Repetir por: {pa}s"
             label.config(text=txt)
+            self.save_history() # Save on edit
         self._open_mouse_dialog("Editar Clique", m, p, save)
 
     def add_text_event(self):
@@ -488,6 +568,7 @@ class MacroApp:
             txt = win.user_data.get("1.0", tk.END).strip()
             label.config(text=f"Digitar: {txt.splitlines()[0][:30]}...")
             label.full_text = txt
+            self.save_history()
             return True
         self._open_generic_dialog("Editar Texto", 450, content, confirm, bind_return=False)
 
@@ -497,20 +578,24 @@ class MacroApp:
             tk.Label(win, text="Pressione as teclas.", bg="#2b2b2b", fg="#ccc").pack(pady=5)
             mode = tk.StringVar(value=initial_mode)
             self._toggle_helper(win, [("Simples","Simples"), ("Manter","Manter"), ("Repetida","Repetida")], mode)
+            
             row = tk.Frame(win, bg="#2b2b2b"); row.pack(pady=15)
             tk.Label(row, text="Combinação:", bg="#2b2b2b", fg="white", font=("",10,"bold")).pack(side=tk.LEFT, padx=5)
             ent = tk.Entry(row, width=20, justify="center", bg="#404040", fg="white", relief=tk.FLAT); ent.pack(side=tk.LEFT, padx=5, ipady=3)
             ent.insert(0, "+".join(keys_captured))
             tk.Button(row, text="🗑️", command=lambda: (keys_captured.clear(), ent.delete(0, tk.END)), bg="#505050", fg="white", bd=0, width=3, cursor="hand2").pack(side=tk.LEFT, padx=5)
+            
             p_fr = tk.Frame(win, bg="#2b2b2b"); p_fr.pack(pady=5)
             lbl_p = tk.Label(p_fr, text="Tempo (s):", bg="#2b2b2b", fg="white"); lbl_p.pack(side=tk.LEFT)
             p_ent = tk.Entry(p_fr, width=6, justify="center"); p_ent.pack(side=tk.LEFT, padx=5); p_ent.insert(0, initial_duration)
+            
             def upd(*a):
                 m = mode.get()
                 if m == "Simples": p_fr.pack_forget()
                 elif m == "Manter": p_fr.pack(); lbl_p.config(text="Duração (s):")
                 elif m == "Repetida": p_fr.pack(); lbl_p.config(text="Quantidade:")
             mode.trace("w", upd); upd()
+            
             def on_k(e):
                 if e.keysym not in keys_captured: keys_captured.append(e.keysym)
                 ent.delete(0, tk.END); ent.insert(0, "+".join(keys_captured)); return "break"
@@ -538,6 +623,7 @@ class MacroApp:
         elif "Pressionar Tecla: " in txt: k=txt.replace("Pressionar Tecla: ", "").split("+")
         def save(mode, keys, dur):
             label.config(text=f"Pressionar Tecla: {'+'.join(keys)}" if mode=="Simples" else f"Manter pressionada: {'+'.join(keys)} - Duração: {dur}s" if mode=="Manter" else f"Tecla repetida: {'+'.join(keys)} - Repetir: {dur}x")
+            self.save_history()
         self._open_key_dialog("Editar Tecla", m, k, d, save)
 
     # Lista
@@ -562,11 +648,12 @@ class MacroApp:
             p = win.user_data["p"].get(); i = win.user_data["i"].get()
             if not p: return False
             try:
-                with open(p, "r") as f: l = f.read().splitlines()
+                with open(p, "r", encoding="utf-8") as f: l = f.read().splitlines()
                 items = [x.strip() for x in l if (x.strip() if i else True)]
                 fp = os.path.abspath(p)
                 self.loaded_lists[fp] = items; self.loaded_index[fp] = 0; self.list_settings[fp] = i
-                if not any(f"Lista: {fp}" in e["label"].cget("text") for e in self.events): self.add_event(f"Lista: {fp}")
+                if not any(f"Lista: {fp}" in e["label"].cget("text") for e in self.events): self.add_event(f"Lista: {fp}", save=False)
+                self.save_history() # Salva após load
                 return f"Carregado {len(items)} itens." 
             except Exception as e: messagebox.showerror("Erro", str(e), parent=self.root); return False
         self._open_generic_dialog("Carregar Lista", 250, content, confirm)
@@ -593,7 +680,7 @@ class MacroApp:
     def add_wait_event(self): self._wait_diag("Adicionar Espera", "", lambda v: self.add_event(f"Esperar {v} segundos"))
     def edit_wait_event(self, l): 
         exist = re.search(r"(\d+\.?\d*)", l.cget("text")).group(1)
-        self._wait_diag("Editar Espera", exist, lambda v: l.config(text=f"Esperar {v} segundos"))
+        self._wait_diag("Editar Espera", exist, lambda v: (l.config(text=f"Esperar {v} segundos"), self.save_history()))
     def add_clear_event(self): self.add_event("Apagar Campo")
 
     # EXPORT/IMPORT/SOBRE
@@ -608,59 +695,83 @@ class MacroApp:
     def export_timeline(self):
         f = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Txt","*.txt")])
         if f:
-            with open(f, "w") as file:
-                for item in self.events:
-                    t = self._clean_text(item["label"].cget("text"))
-                    extras = []
-                    if item["ignore"]: extras.append("ignore=True")
-                    if item["legend"]: extras.append(f"legend={item['legend']}")
-                    extra_str = " | ".join(extras)
-                    if extra_str: extra_str = " | " + extra_str
+            try:
+                with open(f, "w", encoding="utf-8") as file:
+                    file.write(f"# MACTIME_HEADER | v={self.FILE_VERSION}\n")
+                    for item in self.events:
+                        t = self._clean_text(item["label"].cget("text"))
+                        extras = []
+                        if item["ignore"]: extras.append("ignore=True")
+                        if item["legend"]: extras.append(f"legend={item['legend']}")
+                        extra_str = " | ".join(extras)
+                        if extra_str: extra_str = " | " + extra_str
 
-                    if t.startswith("Digitar:") and hasattr(item["label"], "full_text"):
-                        file.write(f"Digitar: <<START>>{extra_str}\n{item['label'].full_text}\n<<END>>\n")
-                    elif t.startswith("Lista:"): 
-                        p = t.split("Lista:")[1].strip()
-                        ign_blank = self.list_settings.get(p, False)
-                        line = f"Lista: {p} | list_ignore={ign_blank}"
-                        if item["ignore"]: line += " | ignore=True"
-                        if item["legend"]: line += f" | legend={item['legend']}"
-                        file.write(line + "\n")
-                    else:
-                        file.write(t + extra_str + "\n")
-            messagebox.showinfo("Sucesso", "Exportado.")
+                        if t.startswith("Digitar:") and hasattr(item["label"], "full_text"):
+                            file.write(f"Digitar: <<START>>{extra_str}\n{item['label'].full_text}\n<<END>>\n")
+                        elif t.startswith("Lista:"): 
+                            p = t.split("Lista:")[1].strip()
+                            ign_blank = self.list_settings.get(p, False)
+                            line = f"Lista: {p} | list_ignore={ign_blank}"
+                            if item["ignore"]: line += " | ignore=True"
+                            if item["legend"]: line += f" | legend={item['legend']}"
+                            file.write(line + "\n")
+                        else:
+                            file.write(t + extra_str + "\n")
+                messagebox.showinfo("Sucesso", "Exportado e atualizado para o formato v3.2.")
+            except Exception as e: messagebox.showerror("Erro", f"{e}")
 
     def import_timeline(self):
         f = filedialog.askopenfilename(filetypes=[("Txt","*.txt")])
         if f:
-            with open(f, "r") as file: lines = file.readlines()
-            for w in self.scrollable_frame.winfo_children(): w.destroy()
-            self.events = []; self.list_settings = {}; i = 0
-            while i < len(lines):
-                l = lines[i].rstrip()
-                legend = ""; ignore = False
-                if " | " in l:
-                    parts = l.split(" | ")
-                    clean_l = parts[0]
-                    for p in parts[1:]:
-                        if p.startswith("legend="): legend = p.replace("legend=", "")
-                        if p == "ignore=True": ignore = True
-                    l = clean_l
+            lines = []
+            try:
+                with open(f, "r", encoding="utf-8") as file: lines = file.readlines()
+            except UnicodeDecodeError:
+                try:
+                    with open(f, "r") as file: lines = file.readlines()
+                except Exception as e: messagebox.showerror("Erro", f"Arquivo ilegível: {e}"); return
+
+            try:
+                for w in self.scrollable_frame.winfo_children(): w.destroy()
+                self.events = []; self.list_settings = {}; i = 0
                 
-                if l.startswith("Digitar: <<START>>"):
-                    full, i = [], i+1
-                    while i < len(lines) and lines[i].strip() != "<<END>>": full.append(lines[i].rstrip()); i+=1
-                    self.add_event(f"Digitar: {' '.join(full)[:30]}...", legend=legend, ignore=ignore)
-                    self.events[-1]["label"].full_text = "\n".join(full)
-                elif l.startswith("Lista:"):
-                    raw_line = lines[i].rstrip()
-                    list_ign = "list_ignore=True" in raw_line
-                    p = l.replace("Lista: ", "").strip()
-                    self.list_settings[p] = list_ign
-                    self.add_event(f"Lista: {p}", legend=legend, ignore=ignore)
-                elif l: self.add_event(l, legend=legend, ignore=ignore)
-                i+=1
-            messagebox.showinfo("Sucesso", "Importado.")
+                if len(lines) > 0 and lines[0].startswith("# MACTIME_HEADER"):
+                    header_parts = lines[0].strip().split("| v=")
+                    if len(header_parts) > 1:
+                        if float(header_parts[1]) > float(self.FILE_VERSION):
+                            if not messagebox.askyesno("Versão Incompatível", "Arquivo criado em versão mais nova. Tentar abrir?"): return
+                    lines.pop(0)
+
+                while i < len(lines):
+                    l = lines[i].rstrip(); legend = ""; ignore = False
+                    if l.startswith("#"): i+=1; continue
+
+                    if " | " in l:
+                        parts = l.split(" | ")
+                        clean_l = parts[0]
+                        for p in parts[1:]:
+                            if p.startswith("legend="): legend = p.replace("legend=", "")
+                            if p == "ignore=True": ignore = True
+                        l = clean_l
+                    
+                    if l.startswith("Digitar: <<START>>"):
+                        full, i = [], i+1
+                        while i < len(lines) and lines[i].strip() != "<<END>>": full.append(lines[i].rstrip()); i+=1
+                        self.add_event(f"Digitar: {' '.join(full)[:30]}...", legend=legend, ignore=ignore, save=False)
+                        self.events[-1]["label"].full_text = "\n".join(full)
+                    elif l.startswith("Lista:"):
+                        raw_line = l
+                        orig_line = lines[i].rstrip()
+                        list_ign = "list_ignore=True" in orig_line
+                        p = l.replace("Lista: ", "").strip()
+                        self.list_settings[p] = list_ign
+                        self.add_event(f"Lista: {p}", legend=legend, ignore=ignore, save=False)
+                    elif l: self.add_event(l, legend=legend, ignore=ignore, save=False)
+                    i+=1
+                
+                self.save_history() # Salva 1x após importar tudo
+                messagebox.showinfo("Sucesso", "Importado.")
+            except Exception as e: messagebox.showerror("Erro", f"{e}")
 
     # EXECUÇÃO
     def stop_execution(self):
@@ -698,7 +809,7 @@ class MacroApp:
         for p in req_files:
             if not os.path.exists(p): messagebox.showerror("Erro", f"Lista não encontrada: {p}"); return
             try: 
-                with open(p, "r") as f: l = f.read().splitlines()
+                with open(p, "r", encoding="utf-8") as f: l = f.read().splitlines()
                 ign = self.list_settings.get(p, False)
                 self.loaded_lists[p] = [x.strip() for x in l if (x.strip() if ign else True)]
                 self.loaded_index[p] = 0
@@ -811,7 +922,6 @@ class MacroApp:
                     k = [normalize_key(x) for x in text.replace("Pressionar Tecla: ", "").strip().split("+")]
                     pyautogui.hotkey(*k)
                 elif "Manter" in text:
-                    # Manter AGORA É RAPID FIRE (SPAM)
                     parts = text.split(" - Duração: ")
                     d = float(parts[1].replace("s","").strip())
                     k = [normalize_key(x) for x in parts[0].replace("Manter pressionada: ", "").split("+")]
@@ -820,10 +930,9 @@ class MacroApp:
                     while time.time() < end_time:
                         if self.stop_requested: break
                         pyautogui.hotkey(*k)
-                        time.sleep(0.05) # ~20x por segundo
+                        time.sleep(0.05) 
                         
                 elif "repetida" in text:
-                    # Repetida AGORA É QUANTIDADE
                     parts = text.split(" - Repetir: ")
                     count = int(parts[1].replace("x","").strip())
                     k = [normalize_key(x) for x in parts[0].replace("Tecla repetida: ", "").split("+")]
